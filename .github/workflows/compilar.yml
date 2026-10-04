@@ -1,6 +1,8 @@
 # Compila el instalador de Windows y lo publica en "Releases".
-# Se lanza solo al subir una etiqueta de versión (v0.3.0, v0.3.1…), que crea PUBLICAR.bat
+# Se lanza solo al subir una etiqueta de versión (v0.3.1, v0.3.2…), que crea PUBLICAR.bat
 # cuando cambia la versión de package.json. También se puede lanzar a mano desde Actions.
+# Se compila sin publicar y luego se crea UNA sola release con los 3 archivos
+# (evita releases duplicadas por subidas en paralelo).
 name: Compilar instalador
 on:
   push:
@@ -18,6 +20,13 @@ jobs:
           node-version: 22
       - run: npm install
       - run: node scripts/make-icon.mjs
-      - run: npx electron-builder --win --publish always
+      - run: npx electron-builder --win --publish never
+      - name: Publicar release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          gh release delete "v$VER" --yes 2>/dev/null || true
+          gh release create "v$VER" dist/CRM-Orum-Setup.exe dist/CRM-Orum-Setup.exe.blockmap dist/latest.yml \
+            --title "CRM Orum $VER" --notes "Versión $VER de la app de escritorio CRM Orum." --latest

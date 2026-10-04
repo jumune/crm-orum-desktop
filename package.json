@@ -1,6 +1,6 @@
 {
   "name": "crm-orum-desktop",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "CRM Orum — app de escritorio (CRM web + llamadas con transcripción local)",
   "main": "main.js",
