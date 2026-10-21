@@ -2,7 +2,9 @@
 //  CRM Orum · Ventana de llamada (transcripción en vivo)
 //  Pista "comercial" = micrófono · pista "cliente" = audio del sistema.
 //  Cada pista se pasa a 16 kHz, se detectan tramos de voz y cada tramo
-//  se transcribe con Whisper local. No se guarda audio.
+//  se transcribe con Whisper local.
+//  v0.4: además se graba el audio (las dos voces mezcladas, Opus 16 kbps)
+//  y, si la llamada dura 30 s o más, se sube a Supabase (de ahí pasa al PC del admin).
 // ============================================================
 (function () {
   "use strict";
@@ -15,6 +17,8 @@
   var live = false, t0 = 0, timer = null, seq = 0, msgs = {}, finishing = false, sysHeard = false;
   // Anti-eco: la voz del cliente que se cuela por el micro (auriculares) no debe contar como del comercial
   var sysV = [], sysD = [], bleedDropped = 0;
+  // Grabación del audio (v0.4): mezcla de micrófono + cliente → MediaRecorder
+  var mixBus = null, recDest = null, recorder = null, recChunks = [], recStart = 0;
 
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -39,6 +43,7 @@
     var proc = ctx.createScriptProcessor(4096, 1, 1);
     var mute = ctx.createGain(); mute.gain.value = 0;               // nunca se reproduce (sin eco)
     src.connect(an); src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+    if (mixBus) src.connect(mixBus);                                // a la grabación
     // Reloj común: si la pista se crea a mitad de llamada, empieza en el instante actual
     var pos0 = live ? Math.round((Date.now() - t0) / 1000 * SR / FRAME) * FRAME : 0;
     var t = { key: key, src: src, proc: proc, an: an, left: new Float32Array(0), fbuf: [], pos: pos0, noise: -60, segD: [],
@@ -213,9 +218,36 @@
     if (bottom) box.scrollTop = box.scrollHeight;
   }
 
+  // ---------- Grabación del audio ----------
+  function setupRecorder() {
+    try {
+      mixBus = ctx.createGain(); mixBus.gain.value = 1;
+      recDest = ctx.createMediaStreamDestination();
+      recDest.channelCount = 1; recDest.channelCountMode = "explicit";
+      mixBus.connect(recDest);
+    } catch (e) { console.log("Sin grabación de audio: " + e.message); mixBus = null; recDest = null; }
+  }
+  function startRecorder() {
+    if (!recDest || typeof MediaRecorder === "undefined") return;
+    try {
+      recorder = new MediaRecorder(recDest.stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: 16000 });
+      recorder.ondataavailable = function (e) { if (e.data && e.data.size) recChunks.push(e.data); };
+      recorder.start(10000); recStart = Date.now();
+    } catch (e) { console.log("No se pudo iniciar la grabación: " + e.message); recorder = null; }
+  }
+  function stopRecorder() {
+    return new Promise(function (resolve) {
+      if (!recorder || recorder.state === "inactive") return resolve(recChunks.length ? new Blob(recChunks, { type: "audio/webm" }) : null);
+      var done = false, fin = function () { if (done) return; done = true; resolve(recChunks.length ? new Blob(recChunks, { type: "audio/webm" }) : null); };
+      recorder.onstop = fin; setTimeout(fin, 3000);
+      try { recorder.stop(); } catch (e) { fin(); }
+    });
+  }
+
   // ---------- Inicio ----------
   function startLive() {
     live = true; t0 = Date.now();
+    startRecorder();
     $("dot").className = "dot on"; $("finish").disabled = false;
     timer = setInterval(function () { $("time").textContent = mmss(Date.now() - t0); }, 500);
   }
@@ -229,6 +261,7 @@
     var wp = window.call.whisperStart();
     try {
       ctx = new AudioContext();
+      setupRecorder();
       await startMic();
       if (!manual()) { try { await startSys(); } catch (e) { $("mode").value = "manual"; } }
       if (manual()) {
@@ -236,6 +269,7 @@
         note(meta.phoneLink ? "Modo manual: pon el móvil en altavoz cerca del micrófono." :
           "Enlace Móvil no está abierto: marca desde tu móvil, ponlo en altavoz cerca del micrófono y habla con normalidad.");
       } else note("En Enlace Móvil pulsa el botón verde «Llamar» para iniciar la llamada. La grabación ya está activa: solo se transcribe cuando alguien habla.");
+      if (recDest) $("legal").style.display = "";
       requestAnimationFrame(draw);
     } catch (e) { pill("Sin micrófono", "err"); note("No se pudo acceder al micrófono: " + e.message); return; }
     // Grabamos ya: si Whisper aún se está preparando, los tramos esperan en cola
@@ -269,12 +303,20 @@
       transcript: ids.map(function (id) { var m = msgs[id]; return { who: m.track === "mic" ? "comercial" : (m.track === "sys" ? "cliente" : "mezcla"), start_ms: m.startMs - first, end_ms: m.endMs - first, text: m.text }; }),
       transcript_text: lines.join("\n"),
     };
+    var blob = await stopRecorder();
+    var recSecs = recStart ? Math.round((Date.now() - recStart) / 1000) : 0;
+    // Se sube si la conversación dura 30 s o más (o si la transcripción falló pero hay 30 s grabados)
+    var keepAudio = blob && blob.size > 0 && (payload.duration_s >= 30 || (!ids.length && recSecs >= 30));
     stopSys(); if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); });
-    $("done-t").textContent = "Guardando en el CRM…";
-    var r = await window.call.save(payload);
+    $("done-t").textContent = keepAudio ? "Guardando la llamada y el audio…" : "Guardando en el CRM…";
+    var audio = null;
+    if (keepAudio) { try { audio = await blob.arrayBuffer(); } catch (e) { audio = null; } }
+    var r = await window.call.save(payload, audio);
     if (r.ok) {
       $("done-t").textContent = "Llamada guardada ✓";
-      $("done-s").innerHTML = (payload.duration_s >= 60 ? "Se analizará en unos segundos y verás el resumen en la oportunidad." : "Es una llamada corta (menos de 1 min): no se analiza.") +
+      $("done-s").innerHTML = (payload.duration_s >= 60 ? "Se analizará en unos segundos y verás el resumen en la oportunidad." :
+        (payload.duration_s >= 30 ? "Llamada corta (menos de 1 min): se guarda la transcripción, sin análisis." : "Menos de 30 s: cuenta como «sin respuesta».")) +
+        (r.audio === "ok" ? "<br>Audio guardado." : (r.audio && r.audio.indexOf("error") === 0 ? "<br>No se pudo subir el audio: queda una copia en tu ordenador." : "")) +
         "<br><br><b>Recuerda colgar en Enlace Móvil o en el móvil.</b>";
       setTimeout(function () { window.call.close(); }, 6000);
     } else {
@@ -287,7 +329,8 @@
   var discardArmed = false;
   $("discard").addEventListener("click", function () {
     if (!discardArmed) { discardArmed = true; this.textContent = "¿Seguro? Pulsa otra vez"; var b = this; setTimeout(function () { discardArmed = false; b.textContent = "Descartar"; }, 3000); return; }
-    live = false; window.call.close();
+    live = false; recChunks = []; try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (e) {}
+    window.call.close();
   });
   $("finish").addEventListener("click", finish);
   $("done-close").addEventListener("click", function () { window.call.close(); });

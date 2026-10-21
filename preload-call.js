@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld("call", {
   whisperStart: () => ipcRenderer.invoke("whisper:start"),
   sendChunk: (job) => ipcRenderer.invoke("whisper:chunk", job),
   pending: () => ipcRenderer.invoke("whisper:pending"),
-  save: (payload) => ipcRenderer.invoke("call:save", payload),
+  save: (payload, audio) => ipcRenderer.invoke("call:save", payload, audio || null),
   close: () => ipcRenderer.invoke("call:close"),
   on: (ch, cb) => {
     if (!/^(live:|call:stop-request)/.test(ch)) return () => {};
