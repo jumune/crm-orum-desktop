@@ -3,6 +3,8 @@
 //  Pista "comercial" = micrófono · pista "cliente" = audio del sistema.
 //  Cada pista se pasa a 16 kHz, se detectan tramos de voz y cada tramo
 //  se transcribe con Whisper local.
+//  v0.5: modo «desde el CRM» (meta.voip): sin Enlace Móvil ni subida de audio (lo graba Twilio);
+//  el cliente se oye por el audio del PC; la ventana se cierra sola al colgar en el CRM.
 //  v0.4: además se graba el audio (las dos voces mezcladas, Opus 16 kbps)
 //  y, si la llamada dura 30 s o más, se sube a Supabase (de ahí pasa al PC del admin).
 // ============================================================
@@ -228,6 +230,7 @@
     } catch (e) { console.log("Sin grabación de audio: " + e.message); mixBus = null; recDest = null; }
   }
   function startRecorder() {
+    if (meta.voip) return;                                         // v0.5: lo graba Twilio
     if (!recDest || typeof MediaRecorder === "undefined") return;
     try {
       recorder = new MediaRecorder(recDest.stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: 16000 });
@@ -257,14 +260,21 @@
     if (meta.logo) $("logo").innerHTML = meta.logo; else $("logo").innerHTML = '<span class="wm">ORUM</span>';
     $("deal").textContent = meta.name || "Llamada";
     $("phone").textContent = meta.phone || "";
-    if (!meta.phoneLink) { $("mode").value = "manual"; }
+    if (meta.voip) {                                               // v0.5: llamada desde el CRM
+      $("mode").value = "app"; $("mode").style.display = "none"; $("redial").style.display = "none";
+      $("finish").textContent = "Terminar transcripción";
+    } else if (!meta.phoneLink) { $("mode").value = "manual"; }
     var wp = window.call.whisperStart();
     try {
       ctx = new AudioContext();
       setupRecorder();
       await startMic();
       if (!manual()) { try { await startSys(); } catch (e) { $("mode").value = "manual"; } }
-      if (manual()) {
+      if (meta.voip) {
+        if (manual()) { $("sys-lbl").style.opacity = ".35"; note("No se pudo captar el audio del PC: solo se transcribirá tu voz. La llamada se graba igual en el CRM."); }
+        else note("Llamada desde el CRM: se transcribe en vivo. Cuelga en la ventana del CRM y esta se cerrará sola.");
+        $("legal").style.display = "";
+      } else if (manual()) {
         $("sys-lbl").style.opacity = ".35";
         note(meta.phoneLink ? "Modo manual: pon el móvil en altavoz cerca del micrófono." :
           "Enlace Móvil no está abierto: marca desde tu móvil, ponlo en altavoz cerca del micrófono y habla con normalidad.");
@@ -313,7 +323,13 @@
     if (keepAudio) { try { audio = await blob.arrayBuffer(); } catch (e) { audio = null; } }
     var r = await window.call.save(payload, audio);
     if (r.ok) {
-      $("done-t").textContent = "Llamada guardada ✓";
+      $("done-t").textContent = meta.voip ? "Transcripción guardada ✓" : "Llamada guardada ✓";
+      if (meta.voip) {
+        $("done-s").innerHTML = "Si la conversación pasa de 1 minuto (desde que contestó), se analizará y verás el resumen en la ficha.";
+        $("done-close").style.display = "";
+        setTimeout(function () { window.call.close(); }, 4000);
+        return;
+      }
       $("done-s").innerHTML = (payload.duration_s >= 60 ? "Se analizará en unos segundos y verás el resumen en la oportunidad." :
         (payload.duration_s >= 30 ? "Llamada corta (menos de 1 min): se guarda la transcripción, sin análisis." : "Menos de 30 s: cuenta como «sin respuesta».")) +
         (r.audio === "ok" ? "<br>Audio guardado." : (r.audio && r.audio.indexOf("error") === 0 ? "<br>No se pudo subir el audio: queda una copia en tu ordenador." : "")) +

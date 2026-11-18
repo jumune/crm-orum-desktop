@@ -10,6 +10,9 @@
 //  En el PC del ADMIN, la app descarga cada hora esos audios a
 //  Documentos\orum-desktop\grabaciones (se borran de ahí a los 90 días);
 //  Supabase borra cada audio en cuanto se descarga, o a los 16 días si no se pudo.
+//  v0.5 (crm_v43): «Llamar desde el CRM» (Twilio). El CRM abre esta ventana con meta.voip:
+//  no se usa Enlace Móvil; se transcribe en vivo (micrófono = comercial, audio del PC = cliente)
+//  y el audio NO se sube (ya lo graba Twilio). La transcripción la entrega el CRM a su llamada.
 // ============================================================
 const { app, BrowserWindow, session, ipcMain, shell, desktopCapturer, screen, Notification } = require("electron");
 const path = require("path");
@@ -234,25 +237,28 @@ ipcMain.handle("app:version", () => app.getVersion());
 ipcMain.handle("phonelink:check", () => phoneLinkRunning());
 ipcMain.handle("call:start", async (_e, { numero, meta }) => {
   if (callWin && !callWin.isDestroyed()) { callWin.focus(); return { ok: false, error: "Ya hay una llamada en curso." }; }
-  const pl = await phoneLinkRunning();
+  const voip = !!(meta && meta.voip);                 // v0.5: llamada por internet desde el CRM
+  const pl = voip ? false : await phoneLinkRunning();
   if (pl) await dial(numero);
   // Tomamos el logo ORUM tal cual lo pinta el CRM (misma marca en la ventana de llamada)
   let logo = "";
   try { logo = await crmWin.webContents.executeJavaScript("(document.querySelector('.orum-logo svg')||{}).outerHTML||''"); } catch (e) {}
-  openCallWindow({ ...(meta || {}), phone: numero, phoneLink: pl, logo });
-  return { ok: true, phoneLink: pl };
+  openCallWindow({ ...(meta || {}), voip, phone: numero, phoneLink: pl, logo });
+  return { ok: true, phoneLink: pl, voip };
 });
 ipcMain.handle("call:stop", () => { if (callWin && !callWin.isDestroyed()) callWin.webContents.send("call:stop-request"); return { ok: true }; });
 
 // ---------- API para la ventana de llamada ----------
 ipcMain.handle("call:meta", () => callMeta);
 ipcMain.handle("setup:state", () => setupState);
-ipcMain.handle("call:redial", () => (callMeta ? dial(callMeta.phone) : false));
+ipcMain.handle("call:redial", () => (callMeta && !callMeta.voip ? dial(callMeta.phone) : false));
 ipcMain.handle("whisper:start", () => whisper.start());
 ipcMain.handle("whisper:chunk", (_e, job) => { whisper.push(job); return true; });
 ipcMain.handle("whisper:pending", () => whisper.pending());
 ipcMain.handle("call:save", async (_e, payload, audio) => {
-  const full = { ...payload, deal_id: callMeta && callMeta.deal_id, client_id: callMeta && callMeta.client_id, phone: callMeta && callMeta.phone };
+  const full = { ...payload, deal_id: callMeta && callMeta.deal_id, lead_id: callMeta && callMeta.lead_id, client_id: callMeta && callMeta.client_id,
+    phone: callMeta && callMeta.phone, voip: !!(callMeta && callMeta.voip) };
+  if (full.voip) audio = null;                      // v0.5: el audio de las llamadas desde el CRM lo guarda Twilio
   // 1) Audio primero (antes de guardar la llamada, para que Supabase la una sola)
   let audioRes = "no";
   if (audio && audio.byteLength > 0) {
